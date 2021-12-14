@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/hyperledger/aries-framework-go/pkg/doc/signature/jsonld"
@@ -527,6 +528,12 @@ func (o *Operation) userLogoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (o *Operation) onboardUser(sub, accessToken string) (string, error) { // nolint:funlen,gocyclo // not much logic
+
+	logger.Warnf("onboardUser starts")
+
+	opStart := time.Now()
+	onboardStart := time.Now()
+
 	b := make([]byte, 32)
 
 	_, err := rand.Read(b)
@@ -546,6 +553,8 @@ func (o *Operation) onboardUser(sub, accessToken string) (string, error) { // no
 	if err != nil {
 		return "", fmt.Errorf("post secret share to auth server: %w", err)
 	}
+	logger.Warnf("postSecret duration %s", time.Since(opStart))
+	opStart = time.Now()
 
 	h := &kmsHeader{
 		userSub:     sub,
@@ -557,6 +566,9 @@ func (o *Operation) onboardUser(sub, accessToken string) (string, error) { // no
 	if err != nil {
 		return "", fmt.Errorf("create authz keystore: %w", err)
 	}
+	logger.Warnf("createAuthzKeyStore duration %s", time.Since(opStart))
+	opStart = time.Now()
+
 
 	authzKeyStoreID := getKeystoreID(authzKeyStoreURL)
 
@@ -564,8 +576,13 @@ func (o *Operation) onboardUser(sub, accessToken string) (string, error) { // no
 	if err != nil {
 		return "", fmt.Errorf("create authz key: %w", err)
 	}
+	logger.Warnf("createKey duration %s", time.Since(opStart))
+	opStart = time.Now()
 
 	_, controller := fingerprint.CreateDIDKey(pubKey)
+
+	logger.Warnf("CreateDIDKey duration %s", time.Since(opStart))
+	opStart = time.Now()
 
 	// EDV vault for storing user's keys
 	kmsVaultURL, kmsEDVCapability, err := createEDVDataVault(o.keyEDVClient, controller, accessToken)
@@ -573,11 +590,17 @@ func (o *Operation) onboardUser(sub, accessToken string) (string, error) { // no
 		return "", fmt.Errorf("create edv vault for kms: %w", err)
 	}
 
+	logger.Warnf("createEDVDataVault duration %s", time.Since(opStart))
+	opStart = time.Now()
+
 	// create EDV controller on operational KMS
 	edvController, err := createEDVController(o.keyServer.OpsKMSURL, accessToken, o.httpClient)
 	if err != nil {
 		return "", fmt.Errorf("create edv controller: %w", err)
 	}
+
+	logger.Warnf("edvController duration %s", time.Since(opStart))
+	opStart = time.Now()
 
 	// create chain capabilities for KMS to use EDV storage
 	edvZCAPs, err := createChainCapability(controller, getVaultID(kmsVaultURL), kmsEDVCapability, edvController,
@@ -586,11 +609,18 @@ func (o *Operation) onboardUser(sub, accessToken string) (string, error) { // no
 		return "", fmt.Errorf("create chain capability: %w", err)
 	}
 
+
+	logger.Warnf("createChainCapability duration %s", time.Since(opStart))
+	opStart = time.Now()
+
 	opKeyStoreURL, opKeyStoreCapability, err := createOpKeyStore(o.keyServer.OpsKMSURL, controller, kmsVaultURL,
 		edvZCAPs, accessToken, o.httpClient)
 	if err != nil {
 		return "", fmt.Errorf("create operational key store: %w", err)
 	}
+
+	logger.Warnf("createOpKeyStore duration %s", time.Since(opStart))
+	opStart = time.Now()
 
 	compressedOPSKMSCapability := base64.URLEncoding.EncodeToString(opKeyStoreCapability)
 
@@ -605,6 +635,9 @@ func (o *Operation) onboardUser(sub, accessToken string) (string, error) { // no
 			return "", fmt.Errorf("create user edv vault : %w", err)
 		}
 	}
+
+	logger.Warnf("createEDVDataVault duration %s", time.Since(opStart))
+	opStart = time.Now()
 
 	edvOpsKID, err := createOpKey(
 		o.keyServer.OpsKMSURL,
@@ -637,6 +670,9 @@ func (o *Operation) onboardUser(sub, accessToken string) (string, error) { // no
 
 	hmacEDVKIDURL := fmt.Sprintf("%s/keys/%s", opKeyStoreURL, hmacEDVKID)
 
+	logger.Warnf("createOpKeys duration %s", time.Since(opStart))
+	opStart = time.Now()
+
 	// TODO remove OPSKMSCapability: https://github.com/trustbloc/edge-agent/issues/583.
 	data := &BootstrapData{
 		User:              uuid.NewString(),
@@ -659,6 +695,9 @@ func (o *Operation) onboardUser(sub, accessToken string) (string, error) { // no
 	if err != nil {
 		return "", fmt.Errorf("update user bootstrap data: %w", err)
 	}
+
+	logger.Warnf("postUserBootstrapData duration %s", time.Since(opStart))
+	logger.Warnf("onboardUser duration %s", time.Since(onboardStart))
 
 	return base64.StdEncoding.EncodeToString(walletSecretShare), nil
 }
@@ -806,6 +845,8 @@ func createOpKeyStore(baseURL, controller, vaultURL string, edvZCAPs []byte, acc
 		return "", nil, fmt.Errorf("marshal create keystore req: %w", err)
 	}
 
+	opStart := time.Now()
+
 	req, err := http.NewRequestWithContext(context.TODO(),
 		http.MethodPost, baseURL+createKeyStorePath, bytes.NewBuffer(reqBytes))
 	if err != nil {
@@ -818,6 +859,8 @@ func createOpKeyStore(baseURL, controller, vaultURL string, edvZCAPs []byte, acc
 	if err != nil {
 		return "", nil, fmt.Errorf("create ops key store: %w", err)
 	}
+
+	logger.Warnf("createOpKeyStore SendHTTPRequest to %s duration %s", baseURL+createKeyStorePath, time.Since(opStart))
 
 	var resp createKeyStoreResp
 
@@ -879,6 +922,10 @@ func createKey(keyStoreURL, keyType string, h *kmsHeader, httpClient common.HTTP
 
 func createOpKey(baseURL, keystoreID, keyType, controller, compressedKMSCapability string,
 	s signer, h *kmsHeader, httpClient common.HTTPClient) (string, error) {
+
+
+	opStart := time.Now()
+
 	reqBytes, err := json.Marshal(createKeyReq{
 		KeyType: keyType,
 	})
@@ -897,6 +944,10 @@ func createOpKey(baseURL, keystoreID, keyType, controller, compressedKMSCapabili
 	req.Header.Add("Secret-Share", base64.StdEncoding.EncodeToString(h.secretShare))
 
 	err = sign(req, controller, actionCreateKey, compressedKMSCapability, s)
+
+	logger.Warnf("createOpKey sign duration %s", time.Since(opStart))
+	opStart = time.Now()
+
 	if err != nil {
 		return "", fmt.Errorf("sign req: %w", err)
 	}
@@ -906,13 +957,20 @@ func createOpKey(baseURL, keystoreID, keyType, controller, compressedKMSCapabili
 		return "", fmt.Errorf("create key: %w", err)
 	}
 
+	logger.Warnf("createOpKey SendHTTPRequest to %s duration %s", baseURL+fmt.Sprintf(keysPath, keystoreID), time.Since(opStart))
+	opStart = time.Now()
+
 	var resp createKeyResp
 
 	if err = json.Unmarshal(respBody, &resp); err != nil {
 		return "", fmt.Errorf("unmarshal create key resp: %w", err)
 	}
 
+	logger.Warnf("createOpKey Unmarshal duration %s", time.Since(opStart))
+	opStart = time.Now()
+
 	return getKeyID(resp.KeyURL), nil
+
 }
 
 func getKeystoreID(location string) string {
